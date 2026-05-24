@@ -75,6 +75,9 @@ class SigmaVSSScraper(BaseScraper):
         # SIGMA VSS does not expose a keyword search without login.
         # We scan all visible open solicitations and filter client-side.
         page_contracts = self._extract_all_solicitations(page)
+        logger.info(
+            "SIGMA: found %d total solicitation(s) before keyword filter", len(page_contracts)
+        )
         for c in page_contracts:
             if c.unique_key not in seen_keys and self.matches_keywords(
                 f"{c.title} {c.description or ''}"
@@ -91,8 +94,10 @@ class SigmaVSSScraper(BaseScraper):
         Returns True if we land on a page that has solicitation data.
         """
         strategies = [
-            self._try_direct_url,
+            # Menu click first — "View Published Solicitations" is always
+            # visible on the home page and is the most reliable path.
             self._try_menu_click,
+            self._try_direct_url,
         ]
         for strategy in strategies:
             try:
@@ -104,11 +109,14 @@ class SigmaVSSScraper(BaseScraper):
 
     def _try_direct_url(self, page: Page) -> bool:
         """Try known CGI Advantage 4 public-solicitation URL patterns."""
+        # CGI Advantage 4 uses Angular hash routing — try hash variants first.
+        # Alternate base paths observed in page source are also included.
+        alt_base = "https://sigma.michigan.gov/PRDVSS1X1/advantage/Advantage4"
         candidates = [
-            f"{VSS_HOME}/vsspublicpages/VSSPublicSolicitations",
-            f"{VSS_HOME}/vsspublicpages/SolicListPage",
+            f"{VSS_HOME}/#/vsspublicpages/VSSPublicSolicitations",
             f"{VSS_HOME}/#/vsspublicpages/SolicListPage",
-            f"{VSS_HOME}/#/solicitations",
+            f"{alt_base}/#/vsspublicpages/VSSPublicSolicitations",
+            f"{alt_base}/#/vsspublicpages/SolicListPage",
         ]
         for url in candidates:
             try:
@@ -137,7 +145,16 @@ class SigmaVSSScraper(BaseScraper):
                 locator = page.locator(f"text={text}").first
                 if locator.is_visible(timeout=3_000):
                     locator.click()
-                    page.wait_for_load_state("networkidle", timeout=20_000)
+                    # Angular SPA needs time to fetch and render the list
+                    page.wait_for_load_state("networkidle", timeout=30_000)
+                    try:
+                        page.wait_for_selector(
+                            "[class*='loading'], [class*='spinner']",
+                            state="hidden",
+                            timeout=5_000,
+                        )
+                    except Exception:
+                        pass
                     if self._has_solicitation_table(page):
                         logger.info("SIGMA: reached solicitations by clicking '%s'", text)
                         return True
@@ -147,9 +164,25 @@ class SigmaVSSScraper(BaseScraper):
 
     def _has_solicitation_table(self, page: Page) -> bool:
         """Heuristic: does this page look like a solicitations listing?"""
+        # Reject if we're still on the home / login page
+        if page.url.rstrip("/") in (
+            VSS_HOME.rstrip("/"),
+            VSS_HOME.rstrip("/") + "#",
+        ):
+            logger.debug("SIGMA: still on home page — navigation did not succeed")
+            return False
         content = page.content().lower()
         signals = ["solicitation", "solicit", "bid", "rfp", "rfq", "itb", "proposal"]
-        return sum(1 for s in signals if s in content) >= 2
+        signal_count = sum(1 for s in signals if s in content)
+        # Require >=3 hits AND actual list rows — the SIGMA 404/error page only
+        # has 2 hits from the navigation bar, not a full solicitation listing.
+        rows = page.query_selector_all("table tr, li")
+        has_data = signal_count >= 3 and len(rows) > 5
+        logger.debug(
+            "SIGMA solicitation check: url=%s signals=%d rows=%d → %s",
+            page.url, signal_count, len(rows), has_data,
+        )
+        return has_data
 
     def _extract_all_solicitations(self, page: Page) -> list[Contract]:
         """

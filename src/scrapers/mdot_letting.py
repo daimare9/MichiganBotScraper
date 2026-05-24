@@ -86,7 +86,17 @@ class MDOTLettingScraper(BaseScraper):
         cutoff = datetime.now() - timedelta(days=LOOKBACK_DAYS)
         results: list[tuple[str, str]] = []
 
+        # Frameset child frames load asynchronously after the parent page
+        # reaches networkidle.  Querying before they finish returns empty
+        # lists, so wait for each frame to reach domcontentloaded first.
+        for frame in page.frames:
+            try:
+                frame.wait_for_load_state("domcontentloaded", timeout=8_000)
+            except Exception:
+                pass
+
         frames_to_search = [page] + list(page.frames)
+        logger.debug("MDOT: %d frame(s) available", len(frames_to_search))
         for frame in frames_to_search:
             try:
                 anchors = frame.query_selector_all("a")
