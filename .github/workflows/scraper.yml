@@ -53,7 +53,8 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: data/contracts.db
-          # Try newest run first, then fall back to any run on this branch
+          # key won't match (this run_id is new); restore-keys find the latest saved cache
+          key: contracts-db-${{ github.ref_name }}-${{ github.run_id }}
           restore-keys: |
             contracts-db-${{ github.ref_name }}-
             contracts-db-
