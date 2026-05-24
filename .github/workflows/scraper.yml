@@ -1,25 +1,13 @@
-name: Scheduled Scrape (GitHub Actions alternative)
+name: Scheduled Scrape
 
-# ─────────────────────────────────────────────────────────────────────────────
-# OPTIONAL: Run the scraper on a schedule via GitHub Actions instead of Docker.
-#
-# Pros  — free, no server needed, zero maintenance
-# Cons  — minimum interval is 5 min; GitHub may delay runs by up to 15 min;
-#         SQLite state is persisted via Actions cache (not 100% guaranteed)
-#
-# To enable:
-#   1. Add secrets in Settings → Secrets → Actions:
-#        GMAIL_USER, GMAIL_APP_PASSWORD, RECIPIENT_EMAIL
-#   2. Remove the `if: false` line below.
-# ─────────────────────────────────────────────────────────────────────────────
+# Runs every 30 minutes via GitHub Actions — no server required.
+# GitHub may delay scheduled runs by up to 15 minutes during peak load.
+# For sub-15-minute precision, use Docker (see README).
 
 on:
   schedule:
-    # Every 30 minutes (GitHub minimum reliable interval)
-    - cron: "*/30 * * * *"
-  workflow_dispatch:   # allow manual trigger from the GitHub UI
-
-if: false  # ← DELETE THIS LINE to activate
+    - cron: "*/30 * * * *"   # every 30 minutes, 24/7
+  workflow_dispatch:           # also triggerable manually from the Actions tab
 
 jobs:
   scrape:
@@ -29,63 +17,95 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # ── Guard: fail fast if secrets haven't been configured ─────────────
+      - name: Verify required secrets are set
+        env:
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          RECIPIENT_EMAIL: ${{ secrets.RECIPIENT_EMAIL }}
+        run: |
+          missing=""
+          [ -z "$GMAIL_USER" ]         && missing="$missing GMAIL_USER"
+          [ -z "$GMAIL_APP_PASSWORD" ] && missing="$missing GMAIL_APP_PASSWORD"
+          [ -z "$RECIPIENT_EMAIL" ]    && missing="$missing RECIPIENT_EMAIL"
+          if [ -n "$missing" ]; then
+            echo "::error::Missing secrets:$missing"
+            echo "::error::Go to Settings → Secrets and variables → Actions and add them."
+            exit 1
+          fi
+          echo "All required secrets are present."
+
+      # ── Python setup ─────────────────────────────────────────────────────
       - name: Set up Python 3.12
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: "pip"
 
-      - name: Install dependencies
+      - name: Install Python dependencies
         run: pip install -r requirements.txt
 
       - name: Install Playwright Chromium
         run: playwright install chromium --with-deps
 
-      - name: Restore SQLite dedup database
-        uses: actions/cache@v4
+      # ── Persist SQLite dedup DB between runs ─────────────────────────────
+      - name: Restore dedup database
+        uses: actions/cache/restore@v4
         with:
           path: data/contracts.db
-          key: contracts-db-${{ github.ref_name }}
-          restore-keys: contracts-db-
+          # Try newest run first, then fall back to any run on this branch
+          restore-keys: |
+            contracts-db-${{ github.ref_name }}-
+            contracts-db-
 
       - name: Create data directory
         run: mkdir -p data
 
-      - name: Run one scrape cycle
+      # ── Scrape ───────────────────────────────────────────────────────────
+      - name: Run scrape cycle
         env:
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           RECIPIENT_EMAIL: ${{ secrets.RECIPIENT_EMAIL }}
-          POLL_INTERVAL_MINUTES: "30"
           DB_PATH: "data/contracts.db"
+          PYTHONPATH: "."   # required so "from src.xxx import" resolves
         run: |
-          python - <<'EOF'
-          from dotenv import load_dotenv
+          python - <<'PYEOF'
+          import logging
+          import sys
+
+          logging.basicConfig(
+              level=logging.INFO,
+              format="%(asctime)s [%(levelname)s] %(message)s",
+              stream=sys.stdout,
+          )
+
           from src.config import load_config
           from src.database import ContractDatabase
           from src.email_sender import send_alert
           from src.scrapers.mdot_letting import MDOTLettingScraper
           from src.scrapers.sigma_vss import SigmaVSSScraper
-          import logging
-          logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 
           config = load_config()
           db = ContractDatabase(config["db_path"])
+
           new_contracts = []
-          for Scraper in [MDOTLettingScraper, SigmaVSSScraper]:
-              found = Scraper(config["keywords"]).scrape()
+          for ScraperClass in [MDOTLettingScraper, SigmaVSSScraper]:
+              found = ScraperClass(config["keywords"]).scrape()
               for c in found:
                   if db.is_new(c):
                       db.mark_seen(c)
                       new_contracts.append(c)
+
           if new_contracts:
               send_alert(new_contracts, config)
-              print(f"Sent alert for {len(new_contracts)} new contract(s)")
+              print(f"✅ Alert sent for {len(new_contracts)} new contract(s)")
           else:
-              print("No new contracts this cycle")
-          EOF
+              print(f"ℹ️  No new contracts (total tracked: {db.total_seen()})")
+          PYEOF
 
-      - name: Save SQLite dedup database
+      # ── Always save the DB so next run can restore it ────────────────────
+      - name: Save dedup database
         uses: actions/cache/save@v4
         if: always()
         with:
