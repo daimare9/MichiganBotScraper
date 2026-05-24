@@ -41,7 +41,8 @@ _ONCLICK_RE = re.compile(r"assign\(['\"]([^'\"]+)['\"]")
 
 # Matches "Description: <text>" up to the next project metadata field or EOF
 _DESC_RE = re.compile(
-    r"Description:\s*(.+?)(?=\nRequired|\nCompletion|\nNet Class|\nDate Advert|\nEstimated|\nCall Number|\Z)",
+    r"Description:\s*(.+?)"
+    r"(?=\nRequired|\nCompletion|\nNet Class|\nDate Advert|\nEstimated|\nCall Number|\Z)",
     re.DOTALL,
 )
 
