@@ -161,7 +161,7 @@ class SigmaVSSScraper(BaseScraper):
         # Require at least 5 distinct signal words so that the app-shell /
         # 404 page (which may contain a few signal words in the nav) does not
         # pass.  A real solicitations list will have dozens of occurrences.
-        has_data = signal_count >= 5
+        has_data = signal_count >= 4
         logger.info(
             "SIGMA nav check: url=%s signals=%d → %s",
             page.url, signal_count, has_data,

@@ -65,3 +65,68 @@ class TestUrlResolution:
     def test_relative_url(self):
         url = _resolve_url(self.BASE, "getOneLetting.htm?id=1")
         assert url == "http://mdotjboss.state.mi.us/BidLetting/getOneLetting.htm?id=1"
+
+
+# ── PDF project extraction ────────────────────────────────────────────────── #
+
+_SAMPLE_PDF_TEXT = """\
+Call Number Contract ID Control Section Project Number
+001 69021-215026 NH 69021 215026A
+Description: 4.09 mi of concrete pavement rehabilitation and resurfacing on I-75.
+Required DBE Participation: 0.00%
+Completion Date: 9/23/2026
+Date Advertised: 3/27/2026
+
+002 82000-219011 NH 82000 219011A
+Description: 0.69 mi of concrete shared-use path and concrete sidewalk ramps.
+Required DBE Participation: 2.00%
+Completion Date: 8/15/2026
+Date Advertised: 3/27/2026
+
+003 11000-220001 NH 11000 220001A
+Description: 5.00 mi of guardrail replacement and signing only.
+Required DBE Participation: 0.00%
+Completion Date: 10/01/2026
+Date Advertised: 3/27/2026
+"""
+
+
+class TestExtractProjectsFromPdf:
+    def test_finds_concrete_project(self, concrete_keywords):
+        scraper = MDOTLettingScraper(concrete_keywords)
+        contracts = scraper._extract_projects_from_pdf(
+            _SAMPLE_PDF_TEXT, "2026-06-05", "http://example.com/letting"
+        )
+        ids = [c.contract_id for c in contracts]
+        assert "69021-215026" in ids   # bridge deck
+        assert "82000-219011" in ids   # concrete sidewalk
+
+    def test_skips_non_matching_project(self, concrete_keywords):
+        scraper = MDOTLettingScraper(concrete_keywords)
+        contracts = scraper._extract_projects_from_pdf(
+            _SAMPLE_PDF_TEXT, "2026-06-05", "http://example.com/letting"
+        )
+        ids = [c.contract_id for c in contracts]
+        assert "11000-220001" not in ids   # guardrail only
+
+    def test_contract_fields_populated(self, concrete_keywords):
+        scraper = MDOTLettingScraper(concrete_keywords)
+        contracts = scraper._extract_projects_from_pdf(
+            _SAMPLE_PDF_TEXT, "2026-06-05", "http://example.com/letting"
+        )
+        c = next(c for c in contracts if c.contract_id == "82000-219011")
+        assert c.source == "MDOT"
+        assert c.letting_date == "2026-06-05"
+        assert c.url == "http://example.com/letting"
+        assert "concrete" in c.description.lower()
+
+    def test_no_duplicates(self, concrete_keywords):
+        scraper = MDOTLettingScraper(concrete_keywords)
+        # Repeat the text to simulate duplicate entries in PDF
+        doubled = _SAMPLE_PDF_TEXT + _SAMPLE_PDF_TEXT
+        contracts = scraper._extract_projects_from_pdf(
+            doubled, "2026-06-05", "http://example.com/letting"
+        )
+        ids = [c.contract_id for c in contracts]
+        assert len(ids) == len(set(ids))
+

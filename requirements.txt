@@ -7,3 +7,4 @@ schedule==1.2.2
 pytest==8.2.0
 pytest-mock==3.14.0
 ruff==0.4.4
+pdfminer.six==20260107
