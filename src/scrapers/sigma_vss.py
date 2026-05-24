@@ -130,57 +130,41 @@ class SigmaVSSScraper(BaseScraper):
 
     def _try_menu_click(self, page: Page) -> bool:
         """Navigate from the VSS home page via the published-solicitations menu item."""
-        page.goto(VSS_HOME, timeout=30_000, wait_until="networkidle")
+        page.goto(VSS_HOME, timeout=45_000, wait_until="networkidle")
+        logger.info("SIGMA: home loaded, url=%s", page.url)
 
-        # Try various text selectors that SIGMA VSS might use
-        link_texts = [
-            "View Published Solicitations",
-            "Published Solicitations",
-            "Solicitations",
-            "Open Bids",
-            "Vendor Solicitations",
-        ]
-        for text in link_texts:
+        # "View Published Solicitations" is an Angular Material card on the home
+        # page carousel.  Click it once — exact text to avoid matching substrings.
+        try:
+            locator = page.get_by_text("View Published Solicitations", exact=True).first
+            locator.wait_for(state="visible", timeout=15_000)
+            locator.click()
+            # Give the Angular router time to navigate and render the grid
             try:
-                locator = page.locator(f"text={text}").first
-                if locator.is_visible(timeout=3_000):
-                    locator.click()
-                    # Angular SPA needs time to fetch and render the list
-                    page.wait_for_load_state("networkidle", timeout=30_000)
-                    try:
-                        page.wait_for_selector(
-                            "[class*='loading'], [class*='spinner']",
-                            state="hidden",
-                            timeout=5_000,
-                        )
-                    except Exception:
-                        pass
-                    if self._has_solicitation_table(page):
-                        logger.info("SIGMA: reached solicitations by clicking '%s'", text)
-                        return True
+                page.wait_for_load_state("networkidle", timeout=45_000)
             except Exception:
-                continue
+                # networkidle may never fire in a polling SPA — wait a fixed amount
+                page.wait_for_timeout(5_000)
+            logger.info("SIGMA: after click, url=%s", page.url)
+            if self._has_solicitation_table(page):
+                logger.info("SIGMA: reached solicitations via menu click")
+                return True
+        except Exception as exc:
+            logger.debug("SIGMA: menu click failed — %s", exc)
         return False
 
     def _has_solicitation_table(self, page: Page) -> bool:
         """Heuristic: does this page look like a solicitations listing?"""
-        # Reject if we're still on the home / login page
-        if page.url.rstrip("/") in (
-            VSS_HOME.rstrip("/"),
-            VSS_HOME.rstrip("/") + "#",
-        ):
-            logger.debug("SIGMA: still on home page — navigation did not succeed")
-            return False
         content = page.content().lower()
         signals = ["solicitation", "solicit", "bid", "rfp", "rfq", "itb", "proposal"]
         signal_count = sum(1 for s in signals if s in content)
-        # Require >=3 hits AND actual list rows — the SIGMA 404/error page only
-        # has 2 hits from the navigation bar, not a full solicitation listing.
-        rows = page.query_selector_all("table tr, li")
-        has_data = signal_count >= 3 and len(rows) > 5
-        logger.debug(
-            "SIGMA solicitation check: url=%s signals=%d rows=%d → %s",
-            page.url, signal_count, len(rows), has_data,
+        # Require at least 5 distinct signal words so that the app-shell /
+        # 404 page (which may contain a few signal words in the nav) does not
+        # pass.  A real solicitations list will have dozens of occurrences.
+        has_data = signal_count >= 5
+        logger.info(
+            "SIGMA nav check: url=%s signals=%d → %s",
+            page.url, signal_count, has_data,
         )
         return has_data
 

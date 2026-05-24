@@ -17,6 +17,8 @@ import re
 from datetime import datetime, timedelta
 from typing import Optional
 
+import requests
+from bs4 import BeautifulSoup
 from playwright.sync_api import Browser, Page, sync_playwright
 
 from ..models import Contract
@@ -77,48 +79,69 @@ class MDOTLettingScraper(BaseScraper):
 
     def _collect_letting_links(self, page: Page) -> list[tuple[str, str]]:
         """
-        Parse the left-sidebar letting dates.
+        Collect upcoming letting dates from the MDOT home page.
 
-        The MDOT site uses an HTML frameset.  Playwright exposes sub-frames
-        via page.frames; we look for the navigation frame by checking which
-        frame contains date-like anchor text.
+        The MDOT site renders letting dates as submit-button inputs in the
+        static HTML — no JavaScript needed:
+
+            <input class="lettingButtons" type="submit"
+                   title="2026-08-28"
+                   onclick="window.location.assign(
+                       'getLettingInfo.htm?letting=2026-08-28&index=0')">
+
+        We fetch the page with requests (fast, no browser overhead) and
+        extract dates from the ``title`` attribute and URLs from ``onclick``.
+        A Playwright fallback is used if requests fails.
         """
         cutoff = datetime.now() - timedelta(days=LOOKBACK_DAYS)
         results: list[tuple[str, str]] = []
 
-        # Frameset child frames load asynchronously after the parent page
-        # reaches networkidle.  Querying before they finish returns empty
-        # lists, so wait for each frame to reach domcontentloaded first.
-        for frame in page.frames:
-            try:
-                frame.wait_for_load_state("domcontentloaded", timeout=8_000)
-            except Exception:
-                pass
+        _headers = {
+            "User-Agent": "Mozilla/5.0 (compatible; MichiganBotScraper/1.0)"
+        }
 
-        frames_to_search = [page] + list(page.frames)
-        logger.debug("MDOT: %d frame(s) available", len(frames_to_search))
-        for frame in frames_to_search:
-            try:
-                anchors = frame.query_selector_all("a")
-            except Exception:
-                continue
+        _onclick_re = re.compile(r"assign\(['\"]([^'\"]+)['\"]")
 
-            for anchor in anchors:
+        def _extract_from_inputs(soup: BeautifulSoup, base_url: str) -> list[tuple[str, str]]:
+            found: list[tuple[str, str]] = []
+            for inp in soup.find_all("input", class_="lettingButtons"):
+                title = inp.get("title", "").strip()   # "2026-08-28"
+                onclick = inp.get("onclick", "")
+                dt = _parse_date(title)
+                if not dt or dt < cutoff:
+                    continue
+                m = _onclick_re.search(onclick)
+                if m:
+                    found.append((title, _resolve_url(base_url, m.group(1))))
+            return found
+
+        try:
+            resp = requests.get(MDOT_HOME, timeout=15, headers=_headers)
+            resp.raise_for_status()
+            soup = BeautifulSoup(resp.text, "html.parser")
+            results = _extract_from_inputs(soup, MDOT_HOME)
+            logger.info(
+                "MDOT: found %d letting button(s) within the lookback window", len(results)
+            )
+        except Exception as exc:
+            logger.warning(
+                "MDOT: requests fetch failed (%s) — falling back to Playwright", exc
+            )
+            # Playwright fallback: apply the same selector on the rendered page
+            for inp in (page.query_selector_all("input.lettingButtons") or []):
                 try:
-                    text = anchor.inner_text().strip()
-                    href = anchor.get_attribute("href") or ""
-                    dt = _parse_date(text)
-                    if dt and dt >= cutoff:
-                        full_url = _resolve_url(MDOT_HOME, href) if href else None
-                        if full_url:
-                            results.append((text, full_url))
+                    title = (inp.get_attribute("title") or "").strip()
+                    onclick = inp.get_attribute("onclick") or ""
+                    dt = _parse_date(title)
+                    if not dt or dt < cutoff:
+                        continue
+                    m = _onclick_re.search(onclick)
+                    if m:
+                        results.append((title, _resolve_url(MDOT_HOME, m.group(1))))
                 except Exception:
                     continue
 
-            if results:
-                break  # found dates in this frame — stop searching
-
-        # De-duplicate by URL
+        # De-duplicate by URL (home page may repeat the same letting)
         seen_urls: set[str] = set()
         unique: list[tuple[str, str]] = []
         for item in results:
@@ -131,6 +154,15 @@ class MDOTLettingScraper(BaseScraper):
     def _parse_letting_page(self, page: Page, letting_date: str) -> list[Contract]:
         """Extract all keyword-matching projects from a letting detail page."""
         contracts: list[Contract] = []
+
+        # The project list is populated asynchronously by a jqGrid AJAX call.
+        # Wait up to 15 s for at least one row to appear inside #lettingBox.
+        try:
+            page.wait_for_selector("#lettingBox tr", state="attached", timeout=15_000)
+        except Exception:
+            logger.debug(
+                "MDOT: #lettingBox grid did not appear within timeout for %s", letting_date
+            )
 
         # The detail page typically renders inside a frame — check all frames
         frames_to_search = [page] + list(page.frames)
