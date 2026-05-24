@@ -189,6 +189,13 @@ class SigmaVSSScraper(BaseScraper):
 
     def _parse_current_page(self, page: Page) -> list[Contract]:
         """Extract all solicitation rows from the currently loaded page."""
+        # Angular needs extra time to populate the data grid after networkidle fires.
+        # Wait until at least one table cell exists before querying rows.
+        try:
+            page.wait_for_selector("table tr td", timeout=15_000)
+        except Exception:
+            pass  # Best-effort; proceed and return empty if table still missing
+
         contracts: list[Contract] = []
         rows = page.query_selector_all("table tr")
 
@@ -212,11 +219,16 @@ class SigmaVSSScraper(BaseScraper):
             return None
 
         values = [c.inner_text().strip() for c in cells]
-        title = values[0] if values else ""
+        # Table layout: [empty, Description, Dept/Buyer, Sol Number, Close Date, Respond]
+        # Cell 0 is always empty; title lives at index 1.
+        title = values[1] if len(values) > 1 else ""
         if not title or title.lower() in ("solicitation", "title", "description", "#"):
             return None  # header row
+        # Skip rows that contain only digits (vendor counts, row IDs, etc.)
+        if title.isdigit():
+            return None
 
-        # Try to extract a solicitation number (typically a long numeric string)
+        # Try to extract a solicitation number from title or dedicated column
         sol_number = _extract_solicitation_number(" ".join(values))
         if not sol_number:
             sol_number = _slugify(title)[:40]
@@ -229,7 +241,8 @@ class SigmaVSSScraper(BaseScraper):
             if href:
                 url = _resolve_sigma_url(href)
 
-        agency = values[1] if len(values) > 1 else "State of Michigan"
+        # Department/Buyer is at index 2; fall back to generic agency
+        agency = (values[2] if len(values) > 2 and values[2] else None) or "State of Michigan"
         post_date_raw = _find_date_in_values(values) or datetime.now().strftime("%Y-%m-%d")
         close_date = _find_close_date(values)
 
