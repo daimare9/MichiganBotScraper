@@ -8,10 +8,15 @@ def test_html_contains_contract_title(sample_contract, concrete_keywords):
     assert "CONCRETE PAVEMENT RESTORATION" in html
 
 
-def test_html_contains_view_bid_link(sample_contract, concrete_keywords):
-    html = _build_html([sample_contract], concrete_keywords)
-    assert "View Bid" in html
-    assert sample_contract.url in html
+def test_html_contains_view_bid_link(sample_contract, sample_sigma_contract, concrete_keywords):
+    # MDOT contracts show "View PDF", SIGMA contracts show "View Solicitation"
+    mdot_html = _build_html([sample_contract], concrete_keywords)
+    assert "View PDF" in mdot_html
+    assert sample_contract.url in mdot_html
+
+    sigma_html = _build_html([sample_sigma_contract], concrete_keywords)
+    assert "View Solicitation" in sigma_html
+    assert sample_sigma_contract.url in sigma_html
 
 
 def test_html_shows_correct_count(sample_contract, sample_sigma_contract, concrete_keywords):
