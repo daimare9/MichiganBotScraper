@@ -1,0 +1,93 @@
+name: Scheduled Scrape (GitHub Actions alternative)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# OPTIONAL: Run the scraper on a schedule via GitHub Actions instead of Docker.
+#
+# Pros  — free, no server needed, zero maintenance
+# Cons  — minimum interval is 5 min; GitHub may delay runs by up to 15 min;
+#         SQLite state is persisted via Actions cache (not 100% guaranteed)
+#
+# To enable:
+#   1. Add secrets in Settings → Secrets → Actions:
+#        GMAIL_USER, GMAIL_APP_PASSWORD, RECIPIENT_EMAIL
+#   2. Remove the `if: false` line below.
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  schedule:
+    # Every 30 minutes (GitHub minimum reliable interval)
+    - cron: "*/30 * * * *"
+  workflow_dispatch:   # allow manual trigger from the GitHub UI
+
+if: false  # ← DELETE THIS LINE to activate
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install Playwright Chromium
+        run: playwright install chromium --with-deps
+
+      - name: Restore SQLite dedup database
+        uses: actions/cache@v4
+        with:
+          path: data/contracts.db
+          key: contracts-db-${{ github.ref_name }}
+          restore-keys: contracts-db-
+
+      - name: Create data directory
+        run: mkdir -p data
+
+      - name: Run one scrape cycle
+        env:
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          RECIPIENT_EMAIL: ${{ secrets.RECIPIENT_EMAIL }}
+          POLL_INTERVAL_MINUTES: "30"
+          DB_PATH: "data/contracts.db"
+        run: |
+          python - <<'EOF'
+          from dotenv import load_dotenv
+          from src.config import load_config
+          from src.database import ContractDatabase
+          from src.email_sender import send_alert
+          from src.scrapers.mdot_letting import MDOTLettingScraper
+          from src.scrapers.sigma_vss import SigmaVSSScraper
+          import logging
+          logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
+
+          config = load_config()
+          db = ContractDatabase(config["db_path"])
+          new_contracts = []
+          for Scraper in [MDOTLettingScraper, SigmaVSSScraper]:
+              found = Scraper(config["keywords"]).scrape()
+              for c in found:
+                  if db.is_new(c):
+                      db.mark_seen(c)
+                      new_contracts.append(c)
+          if new_contracts:
+              send_alert(new_contracts, config)
+              print(f"Sent alert for {len(new_contracts)} new contract(s)")
+          else:
+              print("No new contracts this cycle")
+          EOF
+
+      - name: Save SQLite dedup database
+        uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: data/contracts.db
+          key: contracts-db-${{ github.ref_name }}-${{ github.run_id }}

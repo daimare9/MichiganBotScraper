@@ -1,0 +1,17 @@
+# Concrete-related keywords — any bid containing one of these (case-insensitive)
+# will trigger an email alert.  Add or remove terms as needed.
+keywords:
+  - concrete
+  - cement
+  - pavement
+  - slab
+  - foundation
+  - flatwork
+  - masonry
+  - paving
+  - rebar
+  - precast
+  - portland
+  - curb and gutter
+  - sidewalk
+  - bridge deck
